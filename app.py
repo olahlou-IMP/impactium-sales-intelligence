@@ -178,7 +178,7 @@ async def generate_playbook(request: Request):
                 model=MODEL,
                 max_tokens=16000,
                 system=SYSTEM_PROMPT,
-                tools=[{"type": "web_search_20250305"}],
+                tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
                 messages=[{"role": "user", "content": user_prompt}],
             )
 
@@ -231,7 +231,7 @@ async def generate_playbook(request: Request):
                     model=MODEL,
                     max_tokens=16000,
                     system=SYSTEM_PROMPT,
-                    tools=[{"type": "web_search_20250305"}],
+                    tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
                     messages=messages,
                 )
 
