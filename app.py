@@ -1,7 +1,6 @@
 """
-Impactium Sales Intelligence — Web App
-Serveur Python qui expose une interface web pour générer des playbooks personnalisés.
-L'équipe commerciale tape un nom d'entreprise + contact → Claude fait la recherche → playbook HTML généré.
+Impactium Sales Intelligence — Web App v2
+Mode Light / Complet + Historique partagé persistant (JSON).
 """
 
 import os
@@ -13,30 +12,64 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 import anthropic
 import uvicorn
 
 app = FastAPI(title="Impactium Sales Intelligence")
 
-# --- Config ---
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 MODEL = "claude-sonnet-4-20250514"
 PLAYBOOKS_DIR = Path("playbooks")
 PLAYBOOKS_DIR.mkdir(exist_ok=True)
+HISTORY_FILE = Path("playbooks/history.json")
 MAX_RETRIES = 3
 RETRY_DELAY = 65
 
-# --- System prompt COMPACT ---
-SYSTEM_PROMPT = """Outil Sales Intelligence Impactium. Génère un playbook de vente HTML personnalisé.
+def load_history():
+    if HISTORY_FILE.exists():
+        try:
+            return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+    return []
 
-WORKFLOW: 1) Recherche web (3-4 queries: entreprise+Maroc+actualités, entreprise+RH+recrutement, contact+LinkedIn, secteur+enjeux) 2) Analyse: chiffres, faits datés, score ICP 0-100 3) HTML complet autonome
+def save_history(entries):
+    HISTORY_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
 
-SECTIONS HTML: Hero(nom,poste,score ICP SVG,signaux) | Chiffre-choc | KPIs(5-6 grille) | Brief préparation(3-4§ faits réels) | Approche&pitch(ice-breakers,pain points,pitch 30s) | Structure appel(timeline 6 étapes) | Solutions(4 cartes Impactium) | Objections(4-5 accordéons) | Messages(LinkedIn,Email,Relance J+3,Script vocal) | Plan action(J0→J+30)
+def add_to_history(entry):
+    entries = load_history()
+    entries.insert(0, entry)
+    if len(entries) > 100:
+        entries = entries[:100]
+    save_history(entries)
+
+PROMPT_LIGHT = """Outil Sales Intelligence Impactium. Génère un playbook de vente HTML CONCIS.
+
+WORKFLOW: 1) Recherche web (2-3 queries max) 2) Analyse rapide 3) HTML compact
+
+SECTIONS: Hero(nom,poste,score ICP) | KPIs(4 max) | Brief préparation(2§) | Pitch(ice-breaker+pitch 30s) | Solutions(3 cartes Impactium) | Messages(Email+LinkedIn) | Next steps
 
 MARQUE: fond #001D62(60-70%), or #C8A44E(KPIs), Montserrat/Lato/Space Mono, logo:https://cdn.prod.website-files.com/67c72cd11c32072334fc9599/67c791c8ab02826c49593e65_Logo%20Impactium%205.png, grain CSS, zéro coins arrondis, zéro fond blanc
 
-CONFIDENTIALITÉ—NE JAMAIS CITER: TalenToBe/MyPrint→"Analyse Soft Skills & Alignement", MichelAI→"Recrutement IA & Matching", Kumullus→"Vidéo Learning Interactif", EdBuildIA→"Création E-learning par IA", 33Trucs→"Microlearning par Stories"
+CONFIDENTIEL: TalenToBe/MyPrint→"Analyse Soft Skills & Alignement", MichelAI→"Recrutement IA & Matching", Kumullus→"Vidéo Learning Interactif", EdBuildIA→"Création E-learning par IA", 33Trucs→"Microlearning par Stories"
+
+TON: Business/P&L, chiffres avant mots. Interdit: bienveillance,épanouissement,holistique,QVT,win-win,synergies
+
+5 CAPACITÉS: Recrutement IA(-80%temps) | Soft Skills(-66%erreurs) | Vidéo Learning(×4 engagement) | E-learning IA(-90%coûts) | Microlearning(85%complétion)
+
+CSS: :root{--b:#001D62;--bd:#001248;--bl:#002A80;--bv:#0033CC;--g:#C8A44E;--gb:#E8C86E;--gd:rgba(200,164,78,.15);--gg:rgba(200,164,78,.08);--w:#fff;--w9:rgba(255,255,255,.92);--w7:rgba(255,255,255,.7);--w5:rgba(255,255,255,.5);--w3:rgba(255,255,255,.3);--w1:rgba(255,255,255,.1);--w05:rgba(255,255,255,.05);--red:#EF4444;--green:#22C55E;--orange:#F59E0B;--black:#000}
+
+OUTPUT: UNIQUEMENT le HTML complet (<!DOCTYPE html> à </html>). Rien d'autre."""
+
+PROMPT_COMPLETE = """Outil Sales Intelligence Impactium. Génère un playbook de vente HTML COMPLET et détaillé.
+
+WORKFLOW: 1) Recherche web (3-4 queries: entreprise+Maroc+actualités, entreprise+RH+recrutement, contact+LinkedIn, secteur+enjeux) 2) Analyse: chiffres, faits datés, score ICP 0-100 3) HTML complet autonome
+
+SECTIONS HTML: Hero(nom,poste,score ICP SVG animé,signaux) | Chiffre-choc | KPIs(5-6 grille) | Brief préparation(3-4§ faits réels) | Approche&pitch(ice-breakers,pain points,pitch 30s) | Structure appel(timeline 6 étapes) | Solutions(4 cartes Impactium) | Objections(4-5 accordéons) | Messages(LinkedIn,Email,Relance J+3,Script vocal) | Plan action(J0→J+30)
+
+MARQUE: fond #001D62(60-70%), or #C8A44E(KPIs), Montserrat/Lato/Space Mono, logo:https://cdn.prod.website-files.com/67c72cd11c32072334fc9599/67c791c8ab02826c49593e65_Logo%20Impactium%205.png, grain CSS, zéro coins arrondis, zéro fond blanc
+
+CONFIDENTIALITÉ: TalenToBe/MyPrint→"Analyse Soft Skills & Alignement", MichelAI→"Recrutement IA & Matching", Kumullus→"Vidéo Learning Interactif", EdBuildIA→"Création E-learning par IA", 33Trucs→"Microlearning par Stories"
 
 TON: Business/P&L, "capital humain" pas "bien-être". Chiffres avant mots. Interdit: bienveillance,épanouissement,holistique,QVT,win-win,synergies,révolutionnaire,disruptif
 
@@ -49,7 +82,6 @@ JS: copyText, IntersectionObserver nav, score ring animation
 
 OUTPUT: UNIQUEMENT le HTML complet (<!DOCTYPE html> à </html>). Rien d'autre."""
 
-# --- Personas ---
 PERSONAS = {
     "dg": "DG/CEO — ROI, P&L, croissance",
     "drh": "DRH — Simplification, KPIs direction",
@@ -61,7 +93,6 @@ PERSONAS = {
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    """Page d'accueil."""
     return Path("frontend.html").read_text(encoding="utf-8")
 
 
@@ -75,16 +106,7 @@ async def get_playbook(filename: str):
 
 @app.get("/api/playbooks")
 async def list_playbooks():
-    playbooks = []
-    for f in sorted(PLAYBOOKS_DIR.glob("*.html"), key=lambda p: p.stat().st_mtime, reverse=True):
-        name = f.stem.replace("Playbook_", "").replace("_", " ")
-        playbooks.append({
-            "filename": f.name,
-            "name": name,
-            "date": datetime.fromtimestamp(f.stat().st_mtime).strftime("%d/%m/%Y %H:%M"),
-            "size": f"{f.stat().st_size // 1024}KB"
-        })
-    return playbooks
+    return load_history()
 
 
 @app.post("/api/generate")
@@ -94,6 +116,8 @@ async def generate_playbook(request: Request):
     contact = body.get("contact", "").strip()
     persona = body.get("persona", "autre")
     notes = body.get("notes", "").strip()
+    mode = body.get("mode", "light")
+    user_name = body.get("user_name", "Anonyme").strip() or "Anonyme"
 
     if not entreprise:
         return JSONResponse({"error": "Nom d'entreprise requis"}, status_code=400)
@@ -101,6 +125,15 @@ async def generate_playbook(request: Request):
     api_key = body.get("api_key", "") or ANTHROPIC_API_KEY
     if not api_key:
         return JSONResponse({"error": "Clé API Anthropic requise"}, status_code=400)
+
+    if mode == "light":
+        system_prompt = PROMPT_LIGHT
+        max_tokens = 8000
+        max_uses = 2
+    else:
+        system_prompt = PROMPT_COMPLETE
+        max_tokens = 12000
+        max_uses = 3
 
     parts = [f"Playbook pour: {entreprise}"]
     if contact:
@@ -117,15 +150,16 @@ async def generate_playbook(request: Request):
 
     async def stream_response():
         try:
-            yield json.dumps({"type": "status", "message": "Lancement de la recherche..."}) + "\n"
+            yield json.dumps({"type": "status", "message": f"Mode {'rapide' if mode == 'light' else 'complet'} — Lancement..."}) + "\n"
 
             api_params = dict(
                 model=MODEL,
-                max_tokens=12000,
-                system=SYSTEM_PROMPT,
-                tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+                max_tokens=max_tokens,
+                system=system_prompt,
+                tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": max_uses}],
             )
 
+            response = None
             for attempt in range(MAX_RETRIES):
                 try:
                     response = client.messages.create(
@@ -139,8 +173,12 @@ async def generate_playbook(request: Request):
                         yield json.dumps({"type": "status", "message": f"Rate limit — retry dans {wait}s..."}) + "\n"
                         time.sleep(wait)
                     else:
-                        yield json.dumps({"type": "error", "message": "Rate limit dépassé après 3 tentatives. Attends 2 min."}) + "\n"
+                        yield json.dumps({"type": "error", "message": "Rate limit dépassé. Attends 2 min."}) + "\n"
                         return
+
+            if not response:
+                yield json.dumps({"type": "error", "message": "Pas de réponse."}) + "\n"
+                return
 
             html_content = ""
             search_queries = []
@@ -148,17 +186,15 @@ async def generate_playbook(request: Request):
             for block in response.content:
                 if block.type == "text":
                     html_content += block.text
-                elif block.type == "web_search_tool_result":
-                    for sub in getattr(block, 'content', []):
-                        if getattr(sub, 'type', '') == 'web_search_tool_result':
-                            search_queries.append(getattr(sub, 'query', ''))
                 elif block.type == "tool_use":
-                    search_queries.append(block.input.get("query", ""))
+                    q = block.input.get("query", "")
+                    if q:
+                        search_queries.append(q)
 
             messages = [{"role": "user", "content": user_prompt}]
             current_response = response
             turn_count = 0
-            max_turns = 8
+            max_turns = 6 if mode == "complete" else 3
 
             while current_response.stop_reason == "tool_use" and turn_count < max_turns:
                 turn_count += 1
@@ -237,9 +273,23 @@ async def generate_playbook(request: Request):
 
             safe_entreprise = re.sub(r'[^a-zA-Z0-9]', '_', entreprise)
             safe_contact = re.sub(r'[^a-zA-Z0-9]', '_', contact) if contact else "General"
-            filename = f"Playbook_{safe_entreprise}_{safe_contact}.html"
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"Playbook_{safe_entreprise}_{safe_contact}_{ts}.html"
             filepath = PLAYBOOKS_DIR / filename
             filepath.write_text(html_content, encoding="utf-8")
+
+            entry = {
+                "filename": filename,
+                "entreprise": entreprise,
+                "contact": contact or "—",
+                "persona": persona,
+                "mode": mode,
+                "user": user_name,
+                "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "searches": search_queries,
+                "size": f"{len(html_content) // 1024}KB"
+            }
+            add_to_history(entry)
 
             yield json.dumps({
                 "type": "complete",
@@ -248,7 +298,7 @@ async def generate_playbook(request: Request):
                 "html": html_content
             }) + "\n"
 
-        except anthropic.AuthenticationError as e:
+        except anthropic.AuthenticationError:
             yield json.dumps({"type": "error", "message": "Clé API invalide. Vérifie sur console.anthropic.com"}) + "\n"
         except anthropic.APIError as e:
             yield json.dumps({"type": "error", "message": f"Erreur API: {str(e)}"}) + "\n"
